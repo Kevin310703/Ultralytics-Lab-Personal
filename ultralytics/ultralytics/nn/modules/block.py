@@ -54,6 +54,8 @@ __all__ = (
     "TorchVision",
     "C2fGhost",
     "SimAM",
+    "C2f_Faster",
+    "CoordAtt",
 )
 
 
@@ -2102,4 +2104,49 @@ class SimAM(nn.Module):
         x_minus_mu_square = (x - x.mean(dim=[2, 3], keepdim=True)).pow(2)
         y = x_minus_mu_square / (4 * (x_minus_mu_square.sum(dim=[2, 3], keepdim=True) / n + self.e_lambda)) + 0.5
         return x * self.activaton(y)
-    
+
+class C2f_Faster(nn.Module):
+    """C2f module with PConv for lightweight backbone"""
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
+        super().__init__()
+        self.c = int(c2 * e)
+        self.cv1 = nn.Conv2d(c1, 2 * self.c, 1, 1)
+        self.cv2 = nn.Conv2d((2 + n) * self.c, c2, 1)
+        self.m = nn.ModuleList([
+            nn.Sequential(
+                PConv(self.c, n_div=4),  # Thay Conv bằng PConv
+                nn.Conv2d(self.c, self.c, 1, 1)
+            ) for _ in range(n)
+        ])
+        
+    def forward(self, x):
+        y = list(self.cv1(x).chunk(2, 1))
+        y.extend(m(y[-1]) for m in self.m)
+        return self.cv2(torch.cat(y, 1))
+
+class CoordAtt(nn.Module):
+    def __init__(self, inp, oup=None, reduction=32):
+        super().__init__()
+        if oup is None:
+            oup = inp  # giữ nguyên số kênh
+        self.pool_h = nn.AdaptiveAvgPool2d((None, 1))
+        self.pool_w = nn.AdaptiveAvgPool2d((1, None))
+        mip = max(8, inp // reduction)
+        self.conv1 = nn.Conv2d(inp, mip, kernel_size=1, stride=1, padding=0)
+        self.bn1 = nn.BatchNorm2d(mip)
+        self.act = nn.SiLU()
+        self.conv_h = nn.Conv2d(mip, oup, kernel_size=1, stride=1, padding=0)
+        self.conv_w = nn.Conv2d(mip, oup, kernel_size=1, stride=1, padding=0)
+
+    def forward(self, x):
+        identity = x
+        n, c, h, w = x.size()
+        x_h = self.pool_h(x)  # (n, c, h, 1)
+        x_w = self.pool_w(x).permute(0, 1, 3, 2)  # (n, c, 1, w)
+        y = torch.cat([x_h, x_w], dim=2)  # (n, c, h+w, 1)
+        y = self.act(self.bn1(self.conv1(y)))
+        x_h, x_w = torch.split(y, [h, w], dim=2)
+        x_w = x_w.permute(0, 1, 3, 2)
+        a_h = self.conv_h(x_h).sigmoid()
+        a_w = self.conv_w(x_w).sigmoid()
+        return identity * a_h * a_w

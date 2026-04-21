@@ -24,6 +24,8 @@ __all__ = (
     "LightConv",
     "RepConv",
     "SpatialAttention",
+    "StripeConv",
+    "PConv",
 )
 
 
@@ -667,3 +669,68 @@ class Index(nn.Module):
             (torch.Tensor): Selected tensor.
         """
         return x[self.index]
+
+# =========================================================== Customer Conv
+class StripeConv(nn.Module):
+    """Stripe Convolution: 1x5 + 5x1 parallel branches with size matching."""
+    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=None):
+        super().__init__()
+        # Mặc định dùng kernel (1,5) và (5,1) như thiết kế ban đầu
+        k_v = (1, 5)
+        k_h = (5, 1)
+        
+        # Tính padding để giữ kích thước không gian tương đương (same padding)
+        # Đối với stride=1, padding = (k-1)//2
+        # Đối với stride=2, padding tự động sẽ không đảm bảo hai nhánh bằng nhau, ta sẽ xử lý sau bằng resize.
+        pad_v = (0, k_v[1] // 2)  # (pad_top, pad_bottom) thực tế là (0,2)
+        pad_h = (k_h[0] // 2, 0)  # (pad_top, pad_bottom) thực tế là (2,0)
+        
+        self.conv_v = nn.Conv2d(in_channels, out_channels // 2, 
+                                kernel_size=k_v, stride=stride, padding=pad_v)
+        self.conv_h = nn.Conv2d(in_channels, out_channels // 2, 
+                                kernel_size=k_h, stride=stride, padding=pad_h)
+        self.bn = nn.BatchNorm2d(out_channels)
+        self.act = nn.SiLU()
+        self.stride = stride
+
+    def forward(self, x):
+        x_v = self.conv_v(x)
+        x_h = self.conv_h(x)
+        
+        # Kiểm tra và đồng bộ kích thước không gian nếu cần
+        if x_v.shape[2:] != x_h.shape[2:]:
+            # Lấy kích thước nhỏ hơn (thường lệch 1 pixel)
+            h = min(x_v.shape[2], x_h.shape[2])
+            w = min(x_v.shape[3], x_h.shape[3])
+            # Resize cả hai về cùng kích thước nhỏ nhất
+            x_v = F.interpolate(x_v, size=(h, w), mode='nearest')
+            x_h = F.interpolate(x_h, size=(h, w), mode='nearest')
+        
+        out = torch.cat([x_v, x_h], dim=1)
+        return self.act(self.bn(out))
+
+class PConv(nn.Module):
+    """Partial Convolution - chỉ xử lý một phần kênh"""
+    def __init__(self, dim, n_div=4, kernel_size=3, stride=1):
+        super().__init__()
+        self.dim_conv = dim // n_div  # Số kênh sẽ được thực hiện Conv
+        self.dim_untouched = dim - self.dim_conv
+        
+        # Convolution chỉ trên phần kênh được chọn
+        self.conv = nn.Conv2d(self.dim_conv, self.dim_conv, 
+                              kernel_size, stride, 
+                              padding=kernel_size//2, bias=False)
+        
+        # SỬA TẠI ĐÂY: BatchNorm phải khớp với số kênh đầu ra của self.conv
+        self.bn = nn.BatchNorm2d(self.dim_conv) 
+        self.act = nn.SiLU()
+        
+    def forward(self, x):
+        # Tách kênh: phần đầu qua conv, phần sau giữ nguyên
+        x1, x2 = torch.split(x, [self.dim_conv, self.dim_untouched], dim=1)
+        
+        # x1 đi qua Conv -> BN -> Act
+        x1 = self.act(self.bn(self.conv(x1)))
+        
+        # Ghép lại với phần x2 không đổi
+        return torch.cat([x1, x2], dim=1)

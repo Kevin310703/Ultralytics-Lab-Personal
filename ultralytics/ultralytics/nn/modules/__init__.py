@@ -61,6 +61,8 @@ from .block import (
     TorchVision,
     C2fGhost,
     SimAM,
+    C2f_Faster,
+    CoordAtt,
 )
 from .conv import (
     CBAM,
@@ -77,6 +79,8 @@ from .conv import (
     LightConv,
     RepConv,
     SpatialAttention,
+    StripeConv,
+    PConv,
 )
 from .head import (
     OBB,
