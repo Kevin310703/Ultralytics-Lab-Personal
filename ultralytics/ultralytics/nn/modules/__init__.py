@@ -98,6 +98,7 @@ from .head import (
     YOLOESegment,
     YOLOESegment26,
     v10Detect,
+    SharedDetect,
 )
 from .transformer import (
     AIFI,

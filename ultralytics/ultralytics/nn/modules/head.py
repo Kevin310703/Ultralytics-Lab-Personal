@@ -20,7 +20,7 @@ from .conv import Conv, DWConv
 from .transformer import MLP, DeformableTransformerDecoder, DeformableTransformerDecoderLayer
 from .utils import bias_init_with_prob, linear_init
 
-__all__ = "OBB", "Classify", "Detect", "Pose", "RTDETRDecoder", "Segment", "YOLOEDetect", "YOLOESegment", "v10Detect"
+__all__ = "OBB", "Classify", "Detect", "Pose", "RTDETRDecoder", "Segment", "YOLOEDetect", "YOLOESegment", "v10Detect", "SharedDetect"
 
 
 class Detect(nn.Module):
@@ -1776,3 +1776,37 @@ class v10Detect(Detect):
     def fuse(self):
         """Remove the one2many head for inference optimization."""
         self.cv2 = self.cv3 = None
+
+class SharedDetect(nn.Module):
+    """Shared Decoupled Detection Head cho YOLOv8"""
+    def __init__(self, nc=80, ch=()):
+        super().__init__()
+        self.nc = nc
+        self.nl = len(ch)          # số lượng scale (3)
+        self.reg_max = 16
+        self.no = nc + self.reg_max * 4  # số đầu ra mỗi anchor
+
+        # Shared layers cho classification và regression
+        c_ = ch[0]  # dùng kênh của scale đầu tiên làm cơ sở
+
+        self.shared_cls = nn.Sequential(
+            nn.Conv2d(c_, c_, 3, 1, 1),
+            nn.BatchNorm2d(c_),
+            nn.SiLU(),
+            nn.Conv2d(c_, self.nc, 1)
+        )
+        self.shared_reg = nn.Sequential(
+            nn.Conv2d(c_, c_, 3, 1, 1),
+            nn.BatchNorm2d(c_),
+            nn.SiLU(),
+            nn.Conv2d(c_, self.reg_max * 4, 1)
+        )
+
+    def forward(self, x):
+        """x: list các feature map [P3, P4, P5]"""
+        outputs = []
+        for feat in x:
+            cls_out = self.shared_cls(feat)
+            reg_out = self.shared_reg(feat)
+            outputs.append(torch.cat([reg_out, cls_out], dim=1))
+        return outputs
